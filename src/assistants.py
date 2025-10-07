@@ -1,9 +1,11 @@
 # src/assistants.py
 import os
+import asyncio
 from datetime import datetime
 
 from dotenv import load_dotenv
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
 
 from .prompts import sales_rep_prompt, support_prompt
@@ -45,8 +47,13 @@ support_runnable = support_prompt.partial(time=datetime.now) | llm.bind_tools(
     support_tools
 )
 
-# TODO
-def sales_assistant(state: State, config: RunnableConfig, runnable=sales_runnable) -> dict:
+# Synchronous wrappers that call the async pipeline under the hood.
+# These allow callers that use .invoke(...) (como Streamlit) to work.
+sales_runnable_sync = RunnableLambda(lambda state, config=None: asyncio.run(sales_runnable.ainvoke(state, config=config)))
+support_runnable_sync = RunnableLambda(lambda state, config=None: asyncio.run(support_runnable.ainvoke(state, config=config)))
+
+
+async def sales_assistant(state: State, config: RunnableConfig, runnable=sales_runnable) -> dict:
     """
     LangGraph node function for running the sales assistant LLM agent.
 
@@ -71,9 +78,35 @@ def sales_assistant(state: State, config: RunnableConfig, runnable=sales_runnabl
     - A dictionary with a `"messages"` key containing the new AI message(s).
     Example: `{"messages": [AIMessage(...)]}`
     """
-    pass
+    # extract thread_id robustly
+    thread_id = None
+    try:
+        thread_id = config["configurable"]["thread_id"]
+    except Exception:
+        try:
+            thread_id = getattr(config, "configurable", None) and getattr(config.configurable, "thread_id", None)
+        except Exception:
+            thread_id = None
+
+    if thread_id is not None:
+        set_thread_id(thread_id)
+
+    # secure user_id
+    set_user_id(DEFAULT_USER_ID)
+
+    try:
+        # prefer the asynchronous version if it exists
+        if hasattr(runnable, "ainvoke") and callable(getattr(runnable, "ainvoke")):
+            result = await runnable.ainvoke(state, config=config)
+        else:
+            # run synchronous invoke in executor to not block
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, lambda: runnable.invoke(state, config=config))
+        return {"messages": result}
+    except Exception as e:
+        return {"messages": [{"type": "error", "text": f"sales_assistant error: {e}"}]}
+
 
 
 def support_assistant(state: State, config: RunnableConfig) -> dict:
-    set_thread_id(config["configurable"]["thread_id"])
-    return {"messages": support_runnable.invoke(state, config=config)}
+    return {"messages": []}

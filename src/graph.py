@@ -1,10 +1,16 @@
 # src/graph.py
-from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import START, END, StateGraph
 from langgraph.types import interrupt
 
-from .assistants import sales_assistant, sales_tools, support_assistant, support_tools
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from .assistants import (
+    sales_tools,
+    support_assistant,
+    support_tools,
+    sales_runnable_sync,
+)
 from .state import State
 from .tools import create_tool_node_with_fallback
 
@@ -53,10 +59,6 @@ def after_support_tool(state: dict) -> dict:
     return {}
 
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.types import interrupt
-
-
 def human_approval(state: State) -> dict:
     approval_data = state.get("need_human_approval")
     if not approval_data:
@@ -81,7 +83,7 @@ def human_approval(state: State) -> dict:
 
 def build_graph(return_builder=False):
     builder = StateGraph(State)
-    builder.add_node("sales_rep", sales_assistant)
+    builder.add_node("sales_rep", sales_runnable_sync)
     builder.add_node("customer_support", support_assistant)
     builder.add_node("sales_tools", create_tool_node_with_fallback(sales_tools))
     builder.add_node("support_tools", create_tool_node_with_fallback(support_tools))

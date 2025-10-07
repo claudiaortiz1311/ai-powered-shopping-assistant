@@ -2,14 +2,15 @@
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import pandas as pd
+from pydantic import BaseModel, Field
+
 from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda
-from langchain_core.tools import InjectedToolArg, tool
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.tools import tool
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
 
 _current_user_id: Optional[int] = None
 
@@ -37,11 +38,22 @@ aisles = pd.read_csv("./dataset/aisles.csv")
 prior = pd.read_csv("./dataset/order_products__prior.csv")
 orders = pd.read_csv("./dataset/orders.csv")
 
+# Ensure ID columns have consistent dtypes for safe merges
+for df in (products, aisles, departments):
+    for col in ("aisle_id", "department_id", "product_id"):
+        if col in df.columns:
+            # convert to numeric, coerce errors to NaN, then use nullable Int type
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
 
 # Build enumerated options
 DEPARTMENT_NAMES = sorted(departments["department"].dropna().unique().tolist())
 
 VALID_USER_IDS = sorted(orders["user_id"].dropna().unique().tolist())
+
+# Ensure there's at least one valid user id
+if not VALID_USER_IDS:
+    raise RuntimeError("No valid user IDs found in orders")
 
 # Pick the first user for simplicity and safety
 DEFAULT_USER_ID = VALID_USER_IDS[0]
@@ -50,7 +62,7 @@ DEFAULT_USER_ID = VALID_USER_IDS[0]
 @tool
 def structured_search_tool(
     product_name: Optional[str] = None,
-    department: Optional[Literal[tuple(DEPARTMENT_NAMES)]] = None,
+    department: Optional[str] = None,  # changed from Literal[...] to str
     aisle: Optional[str] = None,
     reordered: Optional[bool] = None,
     min_orders: Optional[int] = None,
@@ -179,7 +191,114 @@ def structured_search_tool(
     LLM Usage Note:
     This tool is ideal for filtered browsing, purchase history analysis, or category breakdowns.
     """
-    pass
+    # Preparar catálogo enriquecido con nombres de aisle/department
+    df = products.copy()
+    if "aisle_id" in df.columns and "aisle" in aisles.columns:
+        df = df.merge(aisles, on="aisle_id", how="left")
+    if "department_id" in df.columns and "department" in departments.columns:
+        df = df.merge(departments, on="department_id", how="left")
+
+    # Normalizar columnas esperadas
+    df["product_name"] = df["product_name"].astype(str)
+    df["aisle"] = df.get("aisle", "").astype(str)
+    df["department"] = df.get("department", "").astype(str)
+
+    # Si se solicita history_only, construir agregados desde prior+orders
+    history_agg = None
+    if history_only:
+        uid = get_user_id()
+        if uid is None:
+            return [{"error": "User ID not set for history_only search."}]
+        user_orders = orders[orders["user_id"] == uid]
+        order_ids = user_orders["order_id"].unique().tolist()
+        user_prior = prior[prior["order_id"].isin(order_ids)]
+        if user_prior.empty:
+            # No compras previas del usuario
+            history_agg = pd.DataFrame(
+                columns=["product_id", "count", "add_to_cart_order", "reordered_sum"]
+            )
+        else:
+            history_agg = (
+                user_prior.groupby("product_id")
+                .agg(
+                    count=("product_id", "size"),
+                    add_to_cart_order=("add_to_cart_order", "mean"),
+                    reordered_sum=("reordered", "sum"),
+                )
+                .reset_index()
+            )
+
+    # Filtrado por nombre/department/aisle sobre catálogo (o sobre el conjunto histórico)
+    if history_only and history_agg is not None:
+        # Unir agregados con catálogo para filtrar solo los productos comprados por el usuario
+        df = df.merge(history_agg, left_on="product_id", right_on="product_id", how="inner")
+    else:
+        # Asegurar presencia de columnas de agregados si no hay history
+        df = df.assign(count=0, add_to_cart_order=pd.NA, reordered_sum=0)
+
+    # Aplicar filtros textuales
+    if product_name:
+        name_lower = product_name.lower()
+        df = df[df["product_name"].str.lower().str.contains(name_lower, na=False)]
+
+    if department:
+        df = df[df["department"].astype(str).str.lower() == str(department).lower()]
+
+    if aisle:
+        aisle_lower = aisle.lower()
+        df = df[df["aisle"].astype(str).str.lower().str.contains(aisle_lower, na=False)]
+
+    # Filtros basados en historial
+    if reordered is not None:
+        if reordered:
+            df = df[df["reordered_sum"].fillna(0) > 0]
+        else:
+            df = df[df["reordered_sum"].fillna(0) == 0]
+
+    if min_orders is not None:
+        df = df[df["count"].fillna(0) >= int(min_orders)]
+
+    # Ordenamiento
+    if order_by:
+        sort_col = "count" if order_by == "count" else "add_to_cart_order"
+        # Si la columna no existe, omitir ordenamiento
+        if sort_col in df.columns:
+            df = df.sort_values(by=sort_col, ascending=bool(ascending))
+
+    # Agrupaciones
+    if group_by in ("department", "aisle"):
+        grp = df.groupby(group_by).agg(num_products=("product_id", "nunique")).reset_index()
+        return grp.sort_values("num_products", ascending=False).to_dict(orient="records")
+
+    # Limitación top_k
+    if top_k is not None and isinstance(top_k, int) and top_k > 0:
+        df = df.head(top_k)
+
+    # Construir salida
+    out = []
+    for _, row in df.iterrows():
+        out.append(
+            {
+                "product_id": int(row["product_id"]) if not pd.isna(row["product_id"]) else None,
+                "product_name": str(row.get("product_name", "")),
+                "aisle": str(row.get("aisle", "")),
+                "department": str(row.get("department", "")),
+                # incluir métricas de historial cuando estén presentes
+                **(
+                    {
+                        "count": int(row["count"]) if not pd.isna(row.get("count")) else 0,
+                        "reordered": int(row["reordered_sum"]) if not pd.isna(row.get("reordered_sum")) else 0,
+                        "add_to_cart_order": float(row["add_to_cart_order"])
+                        if not pd.isna(row.get("add_to_cart_order"))
+                        else None,
+                    }
+                    if history_only
+                    else {}
+                ),
+            }
+        )
+
+    return out
 
 
 # TODO
@@ -234,7 +353,25 @@ _vector_store = None
 
 
 def get_vector_store():
-    pass
+    global _embeddings, _vector_store
+    if _vector_store is not None:
+        return _vector_store
+
+    try:
+        if _embeddings is None:
+            # Modelo ligero de sentence-transformers adecuado para búsquedas semánticas
+            _embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        # Inicializa (o abre) la colección Chroma persistida
+        _vector_store = Chroma(
+            persist_directory=CHROMA_DIR,
+            collection_name=CHROMA_COLLECTION,
+            embedding_function=_embeddings,
+        )
+        return _vector_store
+    except Exception as e:
+        # No propagar excepción cruda: devuelve None y deja que el llamador lo maneje
+        print(f"get_vector_store error: {e}")
+        return None
 
 
 def make_query_prompt(query: str) -> str:
@@ -284,7 +421,57 @@ def search_products(query: str, top_k: int = 5):
     ]
     ```
     """
-    pass
+    if not query or not query.strip():
+        return []
+
+    # prepara texto para el embedding
+    query_text = make_query_prompt(query)
+
+    vs = get_vector_store()
+    if vs is None:
+        return []
+
+    try:
+        # Ejecuta la búsqueda semántica
+        results = vs.similarity_search(query_text, k=top_k)
+    except TypeError:
+        # Algunas versiones usan 'k' o 'top_k' distinto; intentar con posicionals
+        try:
+            results = vs.similarity_search(query_text, top_k)
+        except Exception as e:
+            print(f"similarity_search error: {e}")
+            return []
+    except Exception as e:
+        print(f"search_products error: {e}")
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for doc in results:
+        md = getattr(doc, "metadata", {}) or {}
+        page = getattr(doc, "page_content", "") or ""
+
+        # intentar obtener product_id de metadata en varios formatos
+        pid = md.get("product_id") or md.get("id") or md.get("productId")
+        try:
+            pid = int(pid) if pid is not None else None
+        except Exception:
+            pid = None
+
+        pname = md.get("product_name") or md.get("name") or _product_lookup.get(pid, "Unknown Product")
+        aisle = md.get("aisle") or md.get("aisle_name") or ""
+        department = md.get("department") or md.get("department_name") or ""
+
+        out.append(
+            {
+                "product_id": pid,
+                "product_name": pname,
+                "aisle": aisle,
+                "department": department,
+                "text": page,
+            }
+        )
+
+    return out
 
 
 # TODO
@@ -343,7 +530,27 @@ def search_tool(query: str) -> str:
     search_tool("something high protein for breakfast")
     ```
     """
-    pass
+    try:
+        results = search_products(query, top_k=5)
+    except Exception as e:
+        return f"Search error: {e}"
+
+    if not results:
+        return "No products found matching your search."
+
+    lines: List[str] = []
+    for r in results:
+        pid = r.get("product_id") if r.get("product_id") is not None else "N/A"
+        pname = r.get("product_name", "Unknown Product")
+        aisle = r.get("aisle", "Unknown")
+        department = r.get("department", "Unknown")
+        text = (r.get("text") or "").strip()
+        snippet = text if text else "No additional details."
+        lines.append(
+            f"- {pname} (ID: {pid})\n  Aisle: {aisle}\n  Department: {department}\n  Details: {snippet}"
+        )
+
+    return "\n\n".join(lines)
 
 
 # ---- UPDATED: Cart tools with quantity support ----
@@ -495,7 +702,10 @@ def create_tool_node_with_fallback(tools: list) -> ToolNode:
     Returns:
     - ToolNode: A LangGraph-compatible tool node with error fallback logic.
     """
-    pass
+    # Crear ToolNode con las herramientas provistas y adjuntar fallback
+    node = ToolNode(tools=tools)
+    # with_fallbacks requiere una secuencia de Runnable; envolver la función en RunnableLambda
+    return node.with_fallbacks([RunnableLambda(handle_tool_error)], exception_key="error")
 
 
 __all__ = [

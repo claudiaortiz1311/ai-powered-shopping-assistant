@@ -1,7 +1,7 @@
-# Entorno virtual
+# Virtual Environment
 agentspf/
 
-# Archivos de Python
+# Python Files
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -11,8 +11,12 @@ __pycache__/
 .vscode/
 .idea/
 
-# Cachés de pruebas y compilación
+# Test and compilation caches
 .pytest_cache/
 .mypy_cache/
 dist/
 build/
+
+# Local Data/DBs
+dataset/
+vector_db/
