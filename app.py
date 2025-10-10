@@ -306,6 +306,8 @@ def parse_cart_from_tool_message(content):
                         print(f"Error parsing cart line: {line} - {str(e)}")
     return cart_items
 
+import asyncio
+from langgraph.types import Command
 
 def process_user_input():
     if st.session_state.pending_approval:
@@ -326,8 +328,8 @@ def process_user_input():
     input_state = {"messages": [("user", user_input)]}
 
     try:
-        # Invoke the graph
-        result = graph.invoke(input_state, config)
+        # Async invoke
+        result = asyncio.run(graph.ainvoke(input_state, config))
 
         # Get updated state
         snapshot = graph.get_state(config)
@@ -401,8 +403,7 @@ def process_user_input():
         # Store the updated messages
         st.session_state.messages = messages
 
-        # After all message processing, directly update cart display from source
-        # This ensures the UI shows the true cart state regardless of message flow
+        # Directly update cart display
         direct_cart_update()
 
         # Handle interrupts
@@ -423,22 +424,21 @@ def process_user_input():
         )
 
 
+
 def view_current_cart():
     """
     Function to explicitly request the cart status by sending a message to view the cart.
     This is a direct, transparent approach with no hidden messages.
     """
-    # Add the view cart request to chat history
     cart_message = "What's in my cart?"
     st.session_state.chat_history.append({"role": "user", "content": cart_message})
 
-    # Process through LangGraph visibly
     config = {"configurable": {"thread_id": st.session_state.thread_id}}
     input_state = {"messages": [("user", cart_message)]}
 
     try:
-        # Invoke the graph
-        result = graph.invoke(input_state, config)
+        # Async invoke
+        result = asyncio.run(graph.ainvoke(input_state, config))
 
         # Get updated state
         snapshot = graph.get_state(config)
@@ -483,7 +483,6 @@ def view_current_cart():
                 tool_call_id = getattr(msg, "tool_call_id", "unknown_id")
                 tool_name = "unknown_tool"
 
-                # Find the corresponding tool call
                 for prev_msg in messages:
                     if hasattr(prev_msg, "tool_calls"):
                         for tc in prev_msg.tool_calls:
@@ -495,7 +494,6 @@ def view_current_cart():
                     {"role": "tool_result", "content": content, "tool_name": tool_name}
                 )
 
-                # Try to update cart from view_cart if that was the tool used
                 if tool_name == "view_cart":
                     cart_items = parse_cart_from_tool_message(content)
                     if cart_items:
@@ -504,8 +502,7 @@ def view_current_cart():
         # Store the updated messages
         st.session_state.messages = messages
 
-        # Directly update the cart display from the source
-        # This ensures the display is accurate regardless of message parsing success
+        # Direct cart update
         direct_cart_update()
 
     except Exception as e:
@@ -514,43 +511,41 @@ def view_current_cart():
         )
 
 
+
+
 # Function to toggle cart visibility
 def toggle_cart():
     st.session_state.show_cart = not st.session_state.show_cart
 
-
-# Function to handle supervisor approval
 def process_supervisor_input():
     if not st.session_state.supervisor_input.strip():
         return
 
     supervisor_response = st.session_state.supervisor_input
 
-    # Add supervisor response to chat history
     st.session_state.chat_history.append(
         {"role": "supervisor", "content": supervisor_response}
     )
 
-    # Clear the input and pending approval
     st.session_state.supervisor_input = ""
     st.session_state.pending_approval = None
 
-    # Resume the graph with supervisor response
     config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
     try:
-        result = graph.invoke(Command(resume=supervisor_response), config)
+        # Async invoke
+        result = asyncio.run(graph.ainvoke(Command(resume=supervisor_response), config))
+
         snapshot = graph.get_state(config)
         state = snapshot.values
 
-        # Update messages and current mode
+        # Update messages and mode
         st.session_state.messages = state["messages"]
         dialog_state = state.get("dialog_state", [])
         st.session_state.current_mode = (
             dialog_state[-1] if dialog_state else "sales_rep"
         )
 
-        # Get the latest message after approval
         if len(state["messages"]) > 0:
             last_message = state["messages"][-1]
             content = getattr(last_message, "content", "")

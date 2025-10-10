@@ -1,4 +1,5 @@
 # LLM Agents Final Project
+
 > AI-Powered Shopping Assistant
 
 Hi!
@@ -28,6 +29,7 @@ The system uses this data in two ways: structured search for SQL-like filtering 
 The team decided to build a conversational AI system using modern Large Language Model (LLM) technologies combined with traditional data processing techniques. The system needs to handle real-time conversations while maintaining state and context across multiple conversation turns.
 
 The technologies involved are:
+
 - Python as the main programming language
 - LangChain for LLM integration and tool management
 - LangGraph for conversation flow orchestration
@@ -42,6 +44,7 @@ The technologies involved are:
 ## Installation
 
 Before starting, you must have:
+
 - Python 3.10+
 - An OpenAI API key (Or change for your model of choice!)
 - Git (for cloning if using Google Colab)
@@ -53,11 +56,31 @@ $ pip install -r requirements.txt
 ```
 
 **Important**: Set your OpenAI API key as an environment variable:
+
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-*Note:* We encourage you to install those inside a virtual environment.
+## OpenAI API KEY
+
+1. Create a `.env` file and set the variable
+
+```
+OPENAI_API_KEY="your-api-key-here"
+```
+
+2. Perform quick validations:
+
+```bash
+python check_env.py
+```
+
+Should display
+
+- True
+- The first digits of the APIKEY
+
+_Note:_ We encourage you to install those inside a virtual environment.
 
 Please see `ASSIGNMENT.md` for detailed instructions on building the vector database, which is required before the system will work.
 
@@ -72,6 +95,7 @@ $ black --line-length=88 .
 ```
 
 Wanna read more about Python code style and good practices? Please see:
+
 - [The Hitchhiker's Guide to Python: Code Style](https://docs.python-guide.org/writing/style/)
 - [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
 
@@ -88,6 +112,7 @@ $ pytest tests/
 Once you have completed the TODO functions and built the vector database, you can test the shopping assistant:
 
 ### Command Line Testing
+
 ```python
 from src.conversation_runner import run_single_turn
 result = run_single_turn("Hi, I need some bananas", "test-thread-123")
@@ -95,6 +120,7 @@ print(result)
 ```
 
 ### Web Interface
+
 ```console
 $ streamlit run app.py
 ```
